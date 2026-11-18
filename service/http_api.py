@@ -120,15 +120,29 @@ def make_handler(app: App):
             else:
                 self._send_text(503, "recovering", {"Retry-After": "1"})
 
+        def _require_ready(self) -> bool:
+            # Queries are answered only once state is rebuilt; during recovery
+            # they return 503 so clients retry rather than read empty state (§9).
+            if app.ready:
+                return True
+            self._send_text(503, "recovering", {"Retry-After": "1"})
+            return False
+
         def _handle_device_health(self, device_id: str):
+            if not self._require_ready():
+                return
             self._send_json(200, app.state.device_health(device_id, time.time()))
 
         def _handle_occupancy(self, room_id: str, query: dict):
+            if not self._require_ready():
+                return
             window_seconds = parse_window(query.get("window", DEFAULT_WINDOW))
             self._send_json(200, app.state.room_occupancy(
                 room_id, window_seconds, time.time()))
 
         def _handle_alarms(self, query: dict):
+            if not self._require_ready():
+                return
             since = parse_since(query.get("since", "0"))
             self._send_json(200, {
                 "alarms": app.state.alarms_since(since),
