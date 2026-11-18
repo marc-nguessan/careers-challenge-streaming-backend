@@ -23,11 +23,21 @@ from .falls import FallStore
 
 
 class AppState:
-    def __init__(self):
+    def __init__(self, fall_strategy="exact", fall_window=5.0, alarm_log=None):
         self._lock = threading.Lock()
         self.health = DeviceHealthStore()
         self.occupancy = RoomOccupancyStore()
-        self.falls = FallStore()
+        self.falls = FallStore(strategy=fall_strategy, window=fall_window,
+                               alarm_log=alarm_log)
+
+    def load_alarms(self, records) -> None:
+        """Restore persisted alarms before replaying the event log (§9)."""
+        with self._lock:
+            self.falls.load(records)
+
+    def alarm_last_seq(self) -> int:
+        with self._lock:
+            return self.falls.last_seq()
 
     def apply(self, event: dict, now: float = None):
         """Update derived state from one accepted event (called after the log

@@ -22,6 +22,31 @@ import threading
 import time
 
 
+def iter_records(path: str):
+    """Yield parsed records from an NDJSON file, in order.
+
+    A crash can leave a torn final line (a partial `os.write`). We only yield
+    lines terminated by a newline and skip anything from the first unterminated
+    or unparseable line onward — the recovery side treats that tail as "never
+    durably written" (DESIGN §3/§9). Missing file -> no records.
+    """
+    try:
+        f = open(path, "r")
+    except FileNotFoundError:
+        return
+    with f:
+        for line in f:
+            if not line.endswith("\n"):
+                break  # torn tail from a crash
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except ValueError:
+                break  # corrupt tail; stop here
+
+
 class EventLog:
     def __init__(self, path: str, fsync_interval: float = 0.01):
         """Open (or create) the log for appending.

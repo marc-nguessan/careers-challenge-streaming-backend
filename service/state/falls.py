@@ -40,12 +40,13 @@ import bisect
 
 
 class FallStore:
-    def __init__(self, strategy: str = "exact", window: float = 5.0):
+    def __init__(self, strategy: str = "exact", window: float = 5.0, alarm_log=None):
         # "exact" absorbs only identical-ts copies (threshold 0); "window"
         # absorbs anything within W. See module docstring for why exact is the
         # default on this generator.
         self._strategy = strategy
         self._threshold = 0.0 if strategy == "exact" else window
+        self._alarm_log = alarm_log  # EventLog-like sink; alarms persisted here
         self._anchors = {}  # device_id -> sorted list of anchor ts_epoch
         self._alarms = []   # alarm dicts in emission (seq) order
         self._seq = 0
@@ -71,8 +72,38 @@ class FallStore:
             "confidence": event.get("confidence"),
             "seq": self._seq,
         }
+        # Order (§7): seq assigned -> append to alarm log (os.write) -> only then
+        # visible to queries. If we crash between the event log and here, replay
+        # re-emits this fall (no anchor persisted yet); if we crash after, the
+        # persisted anchor absorbs the replay. Either way, exactly one alarm.
+        if self._alarm_log is not None:
+            self._alarm_log.append(alarm)
         self._alarms.append(alarm)
         return _public(alarm)
+
+    def load(self, records) -> None:
+        """Rebuild alarm state from persisted alarm records on restart (§7/§9):
+        the alarm list (in seq order), per-device anchors, and the seq counter.
+        Records are the alarm log as written (they carry ts_epoch and seq; the
+        log layer's `rt` field is ignored)."""
+        for r in records:
+            alarm = {
+                "event_id": r["event_id"],
+                "device_id": r["device_id"],
+                "room_id": r["room_id"],
+                "type": r["type"],
+                "ts": r["ts"],
+                "ts_epoch": r["ts_epoch"],
+                "confidence": r.get("confidence"),
+                "seq": r["seq"],
+            }
+            self._alarms.append(alarm)
+            bisect.insort(self._anchors.setdefault(r["device_id"], []), r["ts_epoch"])
+            if r["seq"] > self._seq:
+                self._seq = r["seq"]  # resume from the highest persisted seq
+
+    def last_seq(self) -> int:
+        return self._seq
 
     @staticmethod
     def _nearest(anchors: list, t: float):
