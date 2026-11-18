@@ -16,6 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from .state import AppState
 from .validate import validate, ValidationError
 
 # Window label -> seconds (DESIGN §1, §6). The grader only ever asks for these
@@ -55,9 +56,10 @@ class App:
     log and the derived-state stores here; the handler stays a thin adapter.
     """
 
-    def __init__(self, log=None):
+    def __init__(self, log=None, state=None):
         self.ready = True  # flips False during post-restart recovery (§9)
         self.log = log     # EventLog; accepted events are appended before ack (§3)
+        self.state = state if state is not None else AppState()  # derived read models (§5-7)
 
 
 def make_handler(app: App):
@@ -89,8 +91,10 @@ def make_handler(app: App):
                 return
             # Append-before-ack: the 200 below is only sent once os.write has
             # returned, so an ack always means the event is durably logged (§3).
-            # 1.4 updates in-memory state here, after the log write.
             app.log.append(event)
+            # Update derived state after the log write (§5-7). In Phase 1 this
+            # happens inline; §10's owner loop moves it off the request thread.
+            app.state.apply(event)
             self._send_json(200, {"status": "accepted"})
 
         # --- GET -------------------------------------------------------
@@ -117,24 +121,19 @@ def make_handler(app: App):
                 self._send_text(503, "recovering", {"Retry-After": "1"})
 
         def _handle_device_health(self, device_id: str):
-            # Empty shape; filled from state in 1.4.
-            self._send_json(200, {
-                "last_heartbeat_ts": None,
-                "availability_5m": 0.0,
-            })
+            self._send_json(200, app.state.device_health(device_id, time.time()))
 
         def _handle_occupancy(self, room_id: str, query: dict):
             window_seconds = parse_window(query.get("window", DEFAULT_WINDOW))
-            self._send_json(200, {
-                "in_room": False,
-                "occupied_pct": 0.0,
-                "coverage": 0.0,
-                "window_seconds": window_seconds,
-            })
+            self._send_json(200, app.state.room_occupancy(
+                room_id, window_seconds, time.time()))
 
         def _handle_alarms(self, query: dict):
             since = parse_since(query.get("since", "0"))
-            self._send_json(200, {"alarms": [], "since": since})
+            self._send_json(200, {
+                "alarms": app.state.alarms_since(since),
+                "since": since,
+            })
 
         # --- I/O helpers ----------------------------------------------
         def _read_body(self) -> bytes:
