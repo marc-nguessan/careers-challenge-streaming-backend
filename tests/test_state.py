@@ -79,6 +79,11 @@ class HealthStateTest(unittest.TestCase):
         self.assertEqual(h["availability_5m"], 0.0)
 
 
+NOW_OCC = 100_000.0
+HOUR = 3600
+MIN = 60
+
+
 class OccupancyStateTest(unittest.TestCase):
     def test_latest_presence_wins_for_in_room(self):
         s = AppState()
@@ -87,22 +92,52 @@ class OccupancyStateTest(unittest.TestCase):
         occ = s.room_occupancy("room_000", window_s=60, now=30.0)
         self.assertEqual(occ["in_room"], False)  # newest ts decides
 
-    def test_occupied_pct_three_options(self):  # §13 (occupied_pct only; naive)
-        # True at -25m, False at -10m, window=1h -> 15m True / 60m = 0.25.
+    def test_unknown_start(self):  # §13
+        # First event True at -25m, window=1h -> occupied 25/60, coverage 25/60.
         s = AppState()
-        now = 3600.0
-        s.apply(presence("room_000", now - 25 * 60, True))
-        s.apply(presence("room_000", now - 10 * 60, False))
-        occ = s.room_occupancy("room_000", window_s=3600, now=now)
-        self.assertAlmostEqual(occ["occupied_pct"], 15 / 60, places=6)
-
-    def test_duplicate_presence_absorbed(self):
-        s = AppState()
-        now = 100.0
-        s.apply(presence("room_000", 10.0, True))
-        s.apply(presence("room_000", 10.0, True))  # identical -> no effect (§7)
-        occ = s.room_occupancy("room_000", window_s=200, now=now)
+        s.apply(presence("room_000", NOW_OCC - 25 * MIN, True))
+        occ = s.room_occupancy("room_000", window_s=HOUR, now=NOW_OCC)
+        self.assertAlmostEqual(occ["occupied_pct"], 25 / 60, places=9)
+        self.assertAlmostEqual(occ["coverage"], 25 / 60, places=9)
         self.assertEqual(occ["in_room"], True)
+
+    def test_three_options(self):  # §13
+        # True at -25m, False at -10m, window=1h -> occupied 15/60 = 0.25.
+        s = AppState()
+        s.apply(presence("room_000", NOW_OCC - 25 * MIN, True))
+        s.apply(presence("room_000", NOW_OCC - 10 * MIN, False))
+        occ = s.room_occupancy("room_000", window_s=HOUR, now=NOW_OCC)
+        self.assertAlmostEqual(occ["occupied_pct"], 15 / 60, places=9)
+        self.assertAlmostEqual(occ["coverage"], 25 / 60, places=9)
+
+    def test_carry_in(self):  # §13 (the naive bug; 0 was wrong)
+        # Only event True 3h ago, window=1h -> occupied 1.0, in_room True.
+        s = AppState()
+        s.apply(presence("room_000", NOW_OCC - 3 * HOUR, True))
+        occ = s.room_occupancy("room_000", window_s=HOUR, now=NOW_OCC)
+        self.assertAlmostEqual(occ["occupied_pct"], 1.0, places=9)
+        self.assertAlmostEqual(occ["coverage"], 1.0, places=9)
+        self.assertEqual(occ["in_room"], True)
+
+    def test_late_presence_recomputes_history(self):  # §13
+        # True at -30m applied, then a late False at -40m arrives. in_room stays
+        # True (newest ts), and the history integrates with the late event.
+        s = AppState()
+        s.apply(presence("room_000", NOW_OCC - 30 * MIN, True))
+        s.apply(presence("room_000", NOW_OCC - 40 * MIN, False))  # arrives late
+        occ = s.room_occupancy("room_000", window_s=HOUR, now=NOW_OCC)
+        self.assertEqual(occ["in_room"], True)
+        # unknown -60..-40, False -40..-30, True -30..now -> occupied 30/60.
+        self.assertAlmostEqual(occ["occupied_pct"], 30 / 60, places=9)
+        self.assertAlmostEqual(occ["coverage"], 40 / 60, places=9)
+
+    def test_duplicate_presence_absorbed(self):  # §13 duplicate
+        s = AppState()
+        s.apply(presence("room_000", NOW_OCC - 10 * MIN, True))
+        occ1 = s.room_occupancy("room_000", window_s=HOUR, now=NOW_OCC)
+        s.apply(presence("room_000", NOW_OCC - 10 * MIN, True))  # identical
+        occ2 = s.room_occupancy("room_000", window_s=HOUR, now=NOW_OCC)
+        self.assertEqual(occ1, occ2)
 
     def test_unknown_room_is_empty_shape(self):
         s = AppState()
