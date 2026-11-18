@@ -56,10 +56,11 @@ class App:
     log and the derived-state stores here; the handler stays a thin adapter.
     """
 
-    def __init__(self, log=None, state=None):
+    def __init__(self, log=None, state=None, alarms_path=None):
         self.ready = True  # flips False during post-restart recovery (§9)
         self.log = log     # EventLog; accepted events are appended before ack (§3)
         self.state = state if state is not None else AppState()  # derived read models (§5-7)
+        self.alarms_path = alarms_path  # alarm log path for SSE to follow (§8)
 
 
 def make_handler(app: App):
@@ -105,6 +106,8 @@ def make_handler(app: App):
 
             if path == "/healthz":
                 self._handle_healthz()
+            elif path == "/alarms/stream":
+                self._handle_alarm_stream()
             elif path.startswith("/devices/") and path.endswith("/health"):
                 self._handle_device_health(path.split("/")[2])
             elif path.startswith("/rooms/") and path.endswith("/occupancy"):
@@ -148,6 +151,13 @@ def make_handler(app: App):
                 "alarms": app.state.alarms_since(since),
                 "since": since,
             })
+
+        def _handle_alarm_stream(self):
+            if app.alarms_path is None:
+                self._send_json(404, {"error": "stream unavailable"})
+                return
+            from .sse import serve_alarm_stream
+            serve_alarm_stream(self, app.alarms_path)
 
         # --- I/O helpers ----------------------------------------------
         def _read_body(self) -> bytes:

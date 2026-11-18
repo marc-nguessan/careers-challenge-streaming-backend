@@ -23,7 +23,7 @@ from .log import EventLog
 from .validate import validate, ValidationError
 
 
-def make_front_handler(event_log, owner_host, owner_port):
+def make_front_handler(event_log, owner_host, owner_port, alarms_path):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -47,8 +47,14 @@ def make_front_handler(event_log, owner_host, owner_port):
             self._json(200, {"status": "accepted"})
 
         def do_GET(self):
-            # Reads go to the owner (the only process with state). GETs are
-            # low-volume, so a fresh localhost connection per read is fine.
+            # SSE is served locally by following the alarm log the owner writes
+            # (§8/§10) — never proxied, so a long-lived stream doesn't tie up the
+            # owner. Everything else proxies to the owner (the only process with
+            # state). GETs are low-volume, so a fresh localhost connection is fine.
+            if urlparse(self.path).path == "/alarms/stream":
+                from .sse import serve_alarm_stream
+                serve_alarm_stream(self, alarms_path)
+                return
             try:
                 conn = HTTPConnection(owner_host, owner_port, timeout=5)
                 conn.request("GET", self.path)
@@ -93,7 +99,8 @@ def run_front_on_socket(sock, worker_id: int, owner_port: int, data_dir: str):
     inherited from the launcher (pre-fork). Blocks until the process is killed."""
     os.makedirs(data_dir, exist_ok=True)
     log = EventLog(os.path.join(data_dir, f"events.w{worker_id}.ndjson"))
-    handler = make_front_handler(log, "127.0.0.1", owner_port)
+    alarms_path = os.path.join(data_dir, "alarms.ndjson")
+    handler = make_front_handler(log, "127.0.0.1", owner_port, alarms_path)
     # Build a server without letting it create/bind its own socket, then attach
     # the shared one so every worker accepts on the same listen queue.
     server = ThreadingHTTPServer(("0.0.0.0", 0), handler, bind_and_activate=False)

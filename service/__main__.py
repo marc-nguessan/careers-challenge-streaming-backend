@@ -26,7 +26,7 @@ def main():
     alarm_log = EventLog(alarms_path)
     state = AppState(alarm_log=alarm_log)
     event_log = EventLog(events_path)
-    app = App(log=event_log, state=state)
+    app = App(log=event_log, state=state, alarms_path=alarms_path)
 
     app.ready = False
     t0 = time.time()
