@@ -1,49 +1,76 @@
-"""Falls / alarms (DESIGN §7), naive Phase-1.
+"""Falls / alarms (DESIGN §7).
 
-Dedup here is **exact-ts per device**: the first fall at a given `ts` for a
-device emits an alarm; later falls at that same `ts` (the sensor's jitter
-copies, which share an identical `ts` — [V]) are absorbed. This yields one
-alarm per distinct fall locally.
+Fall debounce per device, window W (default 5 s), strategy "window":
+
+    anchors = sorted ts of falls already emitted for this device
+    on fall_warn at ts t:
+        a = anchor nearest to t
+        if a exists and |t - a| <= W:  absorb (emit nothing)
+        else:                          new fall -> emit alarm, insert t
+
+This is idempotent: an exact duplicate sits at distance 0 from its own anchor,
+so it is absorbed — no stored (device_id, seq) seen-set needed. A late fall far
+from every anchor always raises an alarm, however old its ts. Bridging (a late
+event within W of two emitted alarms) attaches to the nearest anchor (tie ->
+earlier) and emits nothing; emitted alarms are never merged.
 
 Alarm record (additive to the stub's shape):
-  event_id = "<device_id>:<anchor_seq>", device_id, room_id, type, ts
-  (the device's ISO timestamp), confidence, seq (a strictly increasing alarm
-  counter). `ts_epoch` is kept internally for `since` filtering/ordering and
-  stripped from query output.
+  event_id = "<device_id>:<anchor_seq>" (the device's seq of the event that
+  created the alarm — stable and unique), device_id, room_id, type, ts (the
+  anchor's genuine device timestamp), confidence, seq (a strictly increasing
+  alarm counter). `ts_epoch` is kept internally for `since` filtering/ordering
+  and stripped from query output.
 
-Naive vs step 2: step 2 replaces exact-ts with the W=5s debounce (§7),
-persists alarms to an append-only alarm log, and resumes `seq` across restart
-(§9). In memory only for now, so `seq` resets on restart.
+Deferred to step 3 (§9): persisting alarms to an append-only alarm log and
+resuming `seq` across restart. In memory only here, so `seq` resets on restart.
 """
+
+import bisect
 
 
 class FallStore:
-    def __init__(self):
-        self._seen = {}     # device_id -> set of ts_epoch already alarmed
+    def __init__(self, window: float = 5.0):
+        self._w = window
+        self._anchors = {}  # device_id -> sorted list of anchor ts_epoch
         self._alarms = []   # alarm dicts in emission (seq) order
         self._seq = 0
 
     def apply_fall(self, event: dict):
         device_id = event["device_id"]
-        ts_epoch = event["ts_epoch"]
-        seen = self._seen.setdefault(device_id, set())
-        if ts_epoch in seen:
-            return None  # jitter copy / exact duplicate -> absorbed (§7)
-        seen.add(ts_epoch)
+        t = event["ts_epoch"]
+        anchors = self._anchors.setdefault(device_id, [])
 
+        nearest = self._nearest(anchors, t)
+        if nearest is not None and abs(t - nearest) <= self._w:
+            return None  # jitter copy / bridged / exact duplicate -> absorbed
+
+        bisect.insort(anchors, t)  # new distinct fall becomes an anchor
         self._seq += 1
         alarm = {
-            "event_id": f"{device_id}:{event['seq']}",  # device's seq, stable+unique
+            "event_id": f"{device_id}:{event['seq']}",  # device's seq of anchor
             "device_id": device_id,
             "room_id": event["room_id"],
             "type": "fall_warn",
-            "ts": event["ts"],          # the anchor's genuine device timestamp
-            "ts_epoch": ts_epoch,       # internal: for since-filter + ordering
+            "ts": event["ts"],      # the anchor's genuine device timestamp
+            "ts_epoch": t,          # internal: since-filter + ordering
             "confidence": event.get("confidence"),
             "seq": self._seq,
         }
         self._alarms.append(alarm)
         return _public(alarm)
+
+    @staticmethod
+    def _nearest(anchors: list, t: float):
+        """The anchor closest to t; on a tie, the earlier (smaller ts)."""
+        if not anchors:
+            return None
+        i = bisect.bisect_left(anchors, t)
+        candidates = []
+        if i < len(anchors):
+            candidates.append(anchors[i])
+        if i > 0:
+            candidates.append(anchors[i - 1])
+        return min(candidates, key=lambda a: (abs(a - t), a))
 
     def query(self, since_epoch: float) -> list:
         # Literal contract: alarms with ts > since; since=0 returns all (§1).
