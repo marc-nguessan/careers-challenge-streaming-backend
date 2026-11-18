@@ -55,8 +55,9 @@ class App:
     log and the derived-state stores here; the handler stays a thin adapter.
     """
 
-    def __init__(self):
+    def __init__(self, log=None):
         self.ready = True  # flips False during post-restart recovery (§9)
+        self.log = log     # EventLog; accepted events are appended before ack (§3)
 
 
 def make_handler(app: App):
@@ -82,10 +83,14 @@ def make_handler(app: App):
             # *before* the 200, so an ack always means "durably logged" (§3).
             body = self._read_body()
             try:
-                validate(body, time.time())
+                event = validate(body, time.time())
             except ValidationError as e:
                 self._send_json(400, {"error": e.reason})
                 return
+            # Append-before-ack: the 200 below is only sent once os.write has
+            # returned, so an ack always means the event is durably logged (§3).
+            # 1.4 updates in-memory state here, after the log write.
+            app.log.append(event)
             self._send_json(200, {"status": "accepted"})
 
         # --- GET -------------------------------------------------------

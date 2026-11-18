@@ -6,6 +6,9 @@ GET responses; later sub-steps fill in behaviour without changing shapes.
 """
 
 import json
+import os
+import shutil
+import tempfile
 import threading
 import time
 import unittest
@@ -13,7 +16,8 @@ from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from service.http_api import make_server
+from service.http_api import App, make_server
+from service.log import EventLog
 
 
 def valid_event():
@@ -28,14 +32,16 @@ def valid_event():
 def start_server():
     """Start the real service on an ephemeral port in a background thread.
 
-    Returns (base_url, server). Port 0 lets the OS pick a free port so tests
-    never collide with a running service or each other.
+    Returns (base_url, server, tmpdir). Port 0 lets the OS pick a free port so
+    tests never collide; the log is written under a throwaway temp dir.
     """
-    server = make_server(("127.0.0.1", 0))
+    tmpdir = tempfile.mkdtemp()
+    log = EventLog(os.path.join(tmpdir, "events.ndjson"), fsync_interval=0)
+    server = make_server(("127.0.0.1", 0), App(log=log))
     port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    return f"http://127.0.0.1:{port}", server
+    return f"http://127.0.0.1:{port}", server, tmpdir
 
 
 def get(url):
@@ -69,11 +75,12 @@ def _parse(resp, body):
 class HttpSkeletonTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.base, cls.server = start_server()
+        cls.base, cls.server, cls.tmpdir = start_server()
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     # POST /events -------------------------------------------------------
     def test_post_valid_event_returns_200(self):
