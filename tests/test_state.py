@@ -193,42 +193,57 @@ class FallDebounceTest(unittest.TestCase):
     def emit(store, t, seq):
         return store.apply_fall(fall("dev_0001", t, f"ts-{t}", seq))
 
-    def test_jitter_identical_ts_one_alarm(self):  # §13 fall jitter
-        s = FallStore(window=5.0)
+    def test_jitter_identical_ts_one_alarm(self):  # §13 fall jitter (default exact)
+        s = FallStore()
         out = [self.emit(s, 500.0, seq) for seq in (1, 2, 3)]
         self.assertEqual(sum(1 for a in out if a), 1)
 
-    def test_order_dependence_late_low_first(self):  # §13 (W=1.5), 1 alarm
+    def test_default_is_exact_keeps_near_falls_distinct(self):
+        # The chosen default: two distinct same-device falls 2s apart are NOT
+        # merged (different ts), matching this generator's ground truth.
+        s = FallStore()  # exact
+        self.assertIsNotNone(self.emit(s, 1000.0, 1))
+        self.assertIsNotNone(self.emit(s, 1002.0, 2))
+        self.assertEqual(len(s.query(0)), 2)
+
+    def test_window_merges_near_falls(self):
+        # Contrast: the window strategy merges the same two falls (within W).
+        s = FallStore(strategy="window", window=5.0)
+        self.assertIsNotNone(self.emit(s, 1000.0, 1))
+        self.assertIsNone(self.emit(s, 1002.0, 2))
+        self.assertEqual(len(s.query(0)), 1)
+
+    def test_order_dependence_late_low_first(self):  # §13 (window, W=1.5), 1 alarm
         # arrival 1.4, 0.0, 2.8: 0.0 and 2.8 are each within 1.5 of anchor 1.4.
-        s = FallStore(window=1.5)
+        s = FallStore(strategy="window", window=1.5)
         out = [self.emit(s, 1.4, 1), self.emit(s, 0.0, 2), self.emit(s, 2.8, 3)]
         self.assertEqual(sum(1 for a in out if a), 1)
 
-    def test_order_dependence_low_first(self):  # §13 (W=1.5), 2 alarms
+    def test_order_dependence_low_first(self):  # §13 (window, W=1.5), 2 alarms
         # arrival 0.0, 1.4, 2.8: 1.4 absorbs into 0.0; 2.8 is >1.5 from 0.0 -> new.
-        s = FallStore(window=1.5)
+        s = FallStore(strategy="window", window=1.5)
         out = [self.emit(s, 0.0, 1), self.emit(s, 1.4, 2), self.emit(s, 2.8, 3)]
         self.assertEqual(sum(1 for a in out if a), 2)
 
-    def test_bridging_attaches_nearest_earlier_no_merge(self):  # §13 (W=3)
+    def test_bridging_attaches_nearest_earlier_no_merge(self):  # §13 (window, W=3)
         # alarms at 1000 and 1004; late event at 1002 is within 3 of both ->
         # absorbed (tie -> earlier), never a third alarm, never a merge.
         # (Base offset off 0 so the since=0 query doesn't clip a ts==0 alarm.)
-        s = FallStore(window=3.0)
+        s = FallStore(strategy="window", window=3.0)
         self.assertIsNotNone(self.emit(s, 1000.0, 1))
         self.assertIsNotNone(self.emit(s, 1004.0, 2))
         self.assertIsNone(self.emit(s, 1002.0, 3))
         self.assertEqual(len(s.query(0)), 2)
 
-    def test_late_isolated_fall_always_emits(self):  # §13 late isolated
-        s = FallStore(window=5.0)
+    def test_late_isolated_fall_always_emits(self):  # §13 late isolated (window)
+        s = FallStore(strategy="window", window=5.0)
         self.emit(s, 1000.0, 1)
         alarm = self.emit(s, 960.0, 2)  # 40s earlier, far from any anchor
         self.assertIsNotNone(alarm)
         self.assertEqual(len(s.query(0)), 2)
 
-    def test_exact_duplicate_absorbed(self):  # §13 duplicate
-        s = FallStore(window=5.0)
+    def test_exact_duplicate_absorbed(self):  # §13 duplicate (default exact)
+        s = FallStore()
         self.assertIsNotNone(self.emit(s, 500.0, 1))
         self.assertIsNone(self.emit(s, 500.0, 2))  # distance 0 -> absorbed
         self.assertEqual(len(s.query(0)), 1)

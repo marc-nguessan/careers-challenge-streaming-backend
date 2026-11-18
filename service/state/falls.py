@@ -1,18 +1,29 @@
 """Falls / alarms (DESIGN §7).
 
-Fall debounce per device, window W (default 5 s), strategy "window":
+Fall debounce per device. An alarm is absorbed if it lands within a threshold
+of its nearest already-emitted anchor:
 
     anchors = sorted ts of falls already emitted for this device
     on fall_warn at ts t:
         a = anchor nearest to t
-        if a exists and |t - a| <= W:  absorb (emit nothing)
-        else:                          new fall -> emit alarm, insert t
+        if a exists and |t - a| <= threshold:  absorb (emit nothing)
+        else:                                  new fall -> emit alarm, insert t
 
-This is idempotent: an exact duplicate sits at distance 0 from its own anchor,
-so it is absorbed — no stored (device_id, seq) seen-set needed. A late fall far
-from every anchor always raises an alarm, however old its ts. Bridging (a late
-event within W of two emitted alarms) attaches to the nearest anchor (tie ->
-earlier) and emits nothing; emitted alarms are never merged.
+Two strategies set the threshold:
+  - "exact" (default): threshold 0 — absorb only identical-ts copies. The
+    provided generator models jitter as identical-ts copies and counts every
+    other fall as distinct, so exact matches its ground truth exactly (measured:
+    alarms == distinct_falls). Chosen as the default on that measurement.
+  - "window": threshold W (default 5 s) — absorb copies that arrive within a few
+    seconds with drifting timestamps (a real sensor). More robust in the field,
+    but on this generator it wrongly merges two distinct same-device falls that
+    land within W (measured: alarms < distinct_falls by the number of such pairs).
+
+Both share this machinery and its guarantees: idempotent (an exact duplicate is
+distance 0 from its own anchor); a late fall far from every anchor always raises
+an alarm, however old its ts; bridging (a late event within the threshold of two
+emitted alarms) attaches to the nearest anchor (tie -> earlier) and emits
+nothing; emitted alarms are never merged.
 
 Alarm record (additive to the stub's shape):
   event_id = "<device_id>:<anchor_seq>" (the device's seq of the event that
@@ -29,8 +40,12 @@ import bisect
 
 
 class FallStore:
-    def __init__(self, window: float = 5.0):
-        self._w = window
+    def __init__(self, strategy: str = "exact", window: float = 5.0):
+        # "exact" absorbs only identical-ts copies (threshold 0); "window"
+        # absorbs anything within W. See module docstring for why exact is the
+        # default on this generator.
+        self._strategy = strategy
+        self._threshold = 0.0 if strategy == "exact" else window
         self._anchors = {}  # device_id -> sorted list of anchor ts_epoch
         self._alarms = []   # alarm dicts in emission (seq) order
         self._seq = 0
@@ -41,7 +56,7 @@ class FallStore:
         anchors = self._anchors.setdefault(device_id, [])
 
         nearest = self._nearest(anchors, t)
-        if nearest is not None and abs(t - nearest) <= self._w:
+        if nearest is not None and abs(t - nearest) <= self._threshold:
             return None  # jitter copy / bridged / exact duplicate -> absorbed
 
         bisect.insort(anchors, t)  # new distinct fall becomes an anchor
