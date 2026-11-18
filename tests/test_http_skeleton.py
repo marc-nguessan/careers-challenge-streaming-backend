@@ -7,11 +7,22 @@ GET responses; later sub-steps fill in behaviour without changing shapes.
 
 import json
 import threading
+import time
 import unittest
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 from service.http_api import make_server
+
+
+def valid_event():
+    """A well-formed heartbeat stamped ~now, so validation (§2) accepts it."""
+    now = time.time()
+    ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.") + f"{int(now * 1000) % 1000:03d}Z"
+    return {"device_id": "dev_0000", "room_id": "room_000",
+            "type": "heartbeat", "ts": ts, "seq": 1}
 
 
 def start_server():
@@ -65,10 +76,15 @@ class HttpSkeletonTest(unittest.TestCase):
         cls.server.shutdown()
 
     # POST /events -------------------------------------------------------
-    def test_post_events_accepts_and_returns_200(self):
-        status, body = post(self.base + "/events", {"anything": "goes"})
+    def test_post_valid_event_returns_200(self):
+        status, body = post(self.base + "/events", valid_event())
         self.assertEqual(status, 200)
         self.assertEqual(body, {"status": "accepted"})
+
+    def test_post_invalid_event_returns_400_with_reason(self):
+        status, body = post(self.base + "/events", {"anything": "goes"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)  # reason string, e.g. "malformed"
 
     def test_post_unknown_path_404(self):
         status, _ = post(self.base + "/nope", {})

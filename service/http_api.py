@@ -12,8 +12,11 @@ per connection, which is enough for the skeleton.
 """
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+from .validate import validate, ValidationError
 
 # Window label -> seconds (DESIGN §1, §6). The grader only ever asks for these
 # three, but we also parse the stub's "<n>m"/"<n>h"/"<n>" forms for safety.
@@ -74,9 +77,15 @@ def make_handler(app: App):
                 self._send_json(404, {"error": "unknown path"})
 
         def _handle_events(self):
-            # 1.1: accept-all. We still drain the body so the connection can be
-            # reused. 1.2 adds validation; 1.3 appends to the log *before* ack.
-            self._read_body()
+            # Drain the body, validate against the server clock, reject with the
+            # reason on failure. 1.3 appends the accepted event to the log here,
+            # *before* the 200, so an ack always means "durably logged" (§3).
+            body = self._read_body()
+            try:
+                validate(body, time.time())
+            except ValidationError as e:
+                self._send_json(400, {"error": e.reason})
+                return
             self._send_json(200, {"status": "accepted"})
 
         # --- GET -------------------------------------------------------
