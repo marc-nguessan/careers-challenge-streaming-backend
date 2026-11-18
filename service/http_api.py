@@ -16,6 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from .metrics import METRICS
 from .state import AppState
 from .validate import validate, ValidationError
 
@@ -82,12 +83,15 @@ def make_handler(app: App):
 
         def _handle_events(self):
             # Drain the body, validate against the server clock, reject with the
-            # reason on failure. 1.3 appends the accepted event to the log here,
+            # reason on failure. The accepted event is appended to the log
             # *before* the 200, so an ack always means "durably logged" (§3).
+            t0 = time.perf_counter()
             body = self._read_body()
             try:
                 event = validate(body, time.time())
             except ValidationError as e:
+                METRICS.inc("events_rejected_total", (e.reason,))
+                METRICS.observe("ingest_request_seconds", time.perf_counter() - t0)
                 self._send_json(400, {"error": e.reason})
                 return
             # Append-before-ack: the 200 below is only sent once os.write has
@@ -96,6 +100,8 @@ def make_handler(app: App):
             # Update derived state after the log write (§5-7). In Phase 1 this
             # happens inline; §10's owner loop moves it off the request thread.
             app.state.apply(event)
+            METRICS.inc("events_accepted_total", (event["type"],))
+            METRICS.observe("ingest_request_seconds", time.perf_counter() - t0)
             self._send_json(200, {"status": "accepted"})
 
         # --- GET -------------------------------------------------------
@@ -106,6 +112,8 @@ def make_handler(app: App):
 
             if path == "/healthz":
                 self._handle_healthz()
+            elif path == "/metrics":
+                self._handle_metrics()
             elif path == "/alarms/stream":
                 self._handle_alarm_stream()
             elif path.startswith("/devices/") and path.endswith("/health"):
@@ -151,6 +159,14 @@ def make_handler(app: App):
                 "alarms": app.state.alarms_since(since),
                 "since": since,
             })
+
+        def _handle_metrics(self):
+            # Refresh cardinality gauges at scrape time, then render (§11).
+            stats = app.state.stats()
+            METRICS.set("devices_tracked", stats["devices"])
+            METRICS.set("rooms_tracked", stats["rooms"])
+            METRICS.set("presence_events_retained", stats["presence_events"])
+            self._send_text(200, METRICS.render())
 
         def _handle_alarm_stream(self):
             if app.alarms_path is None:

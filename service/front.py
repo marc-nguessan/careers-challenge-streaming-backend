@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from .log import EventLog
+from .metrics import METRICS
 from .validate import validate, ValidationError
 
 
@@ -34,16 +35,21 @@ def make_front_handler(event_log, owner_host, owner_port, alarms_path):
             if urlparse(self.path).path != "/events":
                 self._text(404, "unknown path")
                 return
+            t0 = time.perf_counter()
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(length) if length else b""
             try:
                 event = validate(body, time.time())
             except ValidationError as e:
+                METRICS.inc("events_rejected_total", (e.reason,))
+                METRICS.observe("ingest_request_seconds", time.perf_counter() - t0)
                 self._json(400, {"error": e.reason})
                 return
             # Append to this worker's own log, then ack. The owner applies it
             # later by tailing the file (§10) — the front door holds no state.
             event_log.append(event)
+            METRICS.inc("events_accepted_total", (event["type"],))
+            METRICS.observe("ingest_request_seconds", time.perf_counter() - t0)
             self._json(200, {"status": "accepted"})
 
         def do_GET(self):

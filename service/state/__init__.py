@@ -17,6 +17,7 @@ What's naive here (made correct in step 2):
 import threading
 import time
 
+from ..metrics import METRICS
 from .health import DeviceHealthStore
 from .occupancy import RoomOccupancyStore
 from .falls import FallStore
@@ -39,6 +40,15 @@ class AppState:
         with self._lock:
             return self.falls.last_seq()
 
+    def stats(self) -> dict:
+        """Cardinality gauges for /metrics (§11) — counts only, no ids."""
+        with self._lock:
+            return {
+                "devices": len(self.health._last_hb),
+                "rooms": len(self.occupancy._events),
+                "presence_events": sum(len(v) for v in self.occupancy._events.values()),
+            }
+
     def apply(self, event: dict, now: float = None):
         """Update derived state from one accepted event (called after the log
         write). `now` is the apply-time server clock (defaults to wall clock);
@@ -50,12 +60,20 @@ class AppState:
         etype = event["type"]
         ts = event["ts_epoch"]
         with self._lock:
+            METRICS.inc("events_applied_total", (etype,))
             if etype == "heartbeat":
                 self.health.apply_heartbeat(event["device_id"], ts, event["ts"], now)
             elif etype == "presence":
                 self.occupancy.apply_presence(event["room_id"], ts, event["in_room"])
             elif etype == "fall_warn":
-                return self.falls.apply_fall(event)
+                alarm = self.falls.apply_fall(event)
+                if alarm is not None:
+                    METRICS.inc("alarms_emitted_total")
+                    METRICS.set("alarm_last_seq", alarm["seq"])
+                    # ingest receive -> alarm emission (the §8 1s-p95 signal).
+                    METRICS.observe("alarm_latency_seconds",
+                                    max(0.0, time.time() - event.get("rt", now)))
+                return alarm
             return None
 
     def device_health(self, device_id: str, now: float) -> dict:
