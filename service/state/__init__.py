@@ -15,6 +15,7 @@ What's naive here (made correct in step 2):
 """
 
 import threading
+import time
 
 from .health import DeviceHealthStore
 from .occupancy import RoomOccupancyStore
@@ -28,15 +29,19 @@ class AppState:
         self.occupancy = RoomOccupancyStore()
         self.falls = FallStore()
 
-    def apply(self, event: dict):
+    def apply(self, event: dict, now: float = None):
         """Update derived state from one accepted event (called after the log
-        write). Returns a new alarm dict for a fresh fall, else None. motion /
-        sleep_state / net_status are logged but build no derived state (§3)."""
+        write). `now` is the apply-time server clock (defaults to wall clock);
+        health uses it for its ring guard (§5). Returns a new alarm dict for a
+        fresh fall, else None. motion / sleep_state / net_status are logged but
+        build no derived state (§3)."""
+        if now is None:
+            now = time.time()
         etype = event["type"]
         ts = event["ts_epoch"]
         with self._lock:
             if etype == "heartbeat":
-                self.health.apply_heartbeat(event["device_id"], ts, event["ts"])
+                self.health.apply_heartbeat(event["device_id"], ts, event["ts"], now)
             elif etype == "presence":
                 self.occupancy.apply_presence(event["room_id"], ts, event["in_room"])
             elif etype == "fall_warn":

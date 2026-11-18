@@ -31,23 +31,50 @@ def fall(device_id, ts_epoch, ts_iso, seq, confidence=0.9):
 class HealthStateTest(unittest.TestCase):
     def test_last_heartbeat_is_the_newest_iso(self):
         s = AppState()
-        s.apply(heartbeat("dev_0001", 100.0, "2026-01-01T00:01:40.000Z", seq=1))
-        s.apply(heartbeat("dev_0001", 50.0, "2026-01-01T00:00:50.000Z", seq=2))  # older
-        h = s.device_health("dev_0001", now=120.0)
+        s.apply(heartbeat("dev_0001", 100.0, "2026-01-01T00:01:40.000Z", seq=1), now=200.0)
+        s.apply(heartbeat("dev_0001", 50.0, "2026-01-01T00:00:50.000Z", seq=2), now=200.0)  # older
+        h = s.device_health("dev_0001", now=200.0)
         self.assertEqual(h["last_heartbeat_ts"], "2026-01-01T00:01:40.000Z")  # max ts wins
 
-    def test_availability_counts_distinct_seconds_over_300(self):
+    def test_availability_ring_distinct_seconds_with_gap(self):  # §13 health
+        # 300s window [701,1000]. 208 distinct seconds (160 in 701..860, 48 in
+        # 901..948, a 40s gap 861..900), plus two extra heartbeats at second 701
+        # (three sharing one second). 210 heartbeats total -> availability
+        # == 208/300 (and <= 208/300 per the spec wording).
         s = AppState()
         now = 1000.0
-        # three heartbeats sharing one second count once; two more in-window.
-        for ts in (990.0, 990.4, 990.8, 995.0, 998.0):
-            s.apply(heartbeat("dev_0001", ts))
+        seconds = list(range(701, 861)) + list(range(901, 949))  # 160 + 48 = 208
+        self.assertEqual(len(seconds), 208)
+        for sec in seconds:
+            s.apply(heartbeat("dev_0001", float(sec)), now=now)
+        for _ in range(2):  # two extra at second 701 -> three total there
+            s.apply(heartbeat("dev_0001", 701.0), now=now)
         h = s.device_health("dev_0001", now=now)
-        self.assertAlmostEqual(h["availability_5m"], 3 / 300)  # seconds 990,995,998
+        self.assertLessEqual(h["availability_5m"], 208 / 300)
+        self.assertAlmostEqual(h["availability_5m"], 208 / 300, places=9)
+
+    def test_old_heartbeat_updates_last_hb_not_ring(self):
+        # A heartbeat older than now-300 sets last_hb but must not mark the ring
+        # (can't affect any window; avoids clobbering a fresher slot).
+        s = AppState()
+        s.apply(heartbeat("dev_0001", 100.0, "2026-01-01T00:01:40.000Z"), now=1000.0)
+        h = s.device_health("dev_0001", now=1000.0)
+        self.assertEqual(h["last_heartbeat_ts"], "2026-01-01T00:01:40.000Z")
+        self.assertEqual(h["availability_5m"], 0.0)  # ring untouched
+
+    def test_duplicate_heartbeat_idempotent(self):  # §13 duplicate
+        s = AppState()
+        now = 1000.0
+        s.apply(heartbeat("dev_0001", 950.0), now=now)
+        before = s.device_health("dev_0001", now=now)["availability_5m"]
+        s.apply(heartbeat("dev_0001", 950.0), now=now)  # same second again
+        after = s.device_health("dev_0001", now=now)["availability_5m"]
+        self.assertEqual(before, after)
+        self.assertAlmostEqual(after, 1 / 300)
 
     def test_unknown_device_is_empty_shape(self):
         s = AppState()
-        h = s.device_health("ghost", now=1.0)
+        h = s.device_health("ghost", now=1000.0)
         self.assertIsNone(h["last_heartbeat_ts"])
         self.assertEqual(h["availability_5m"], 0.0)
 
