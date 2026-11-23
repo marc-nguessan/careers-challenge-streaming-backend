@@ -5,10 +5,13 @@ replay, Last-Event-ID resume). The integration test proves the HTTP wiring:
 connect to /alarms/stream over a real socket and receive an alarm.
 """
 
+import io
 import json
 import os
 import shutil
 import socket
+import struct
+import sys
 import tempfile
 import threading
 import time
@@ -16,7 +19,7 @@ import unittest
 from urllib.request import Request, urlopen
 
 from service.log import EventLog
-from service.http_api import App, make_server
+from service.http_api import App, make_server, make_handler, QuietThreadingHTTPServer
 from service.state import AppState
 from service.sse import run_alarm_stream, _format_event
 
@@ -119,6 +122,58 @@ class SseHttpIntegrationTest(unittest.TestCase):
         self.assertIn(b"text/event-stream", buf)       # correct content type
         self.assertIn(b"id: 1", buf)                    # SSE id = alarm seq
         self.assertIn(b'"event_id": "dev_0002:1"', buf)
+
+    def test_abrupt_disconnect_keeps_server_responsive(self):
+        self._post_fall()
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        s.sendall(b"GET /alarms/stream HTTP/1.1\r\nHost: t\r\n\r\n")
+        s.settimeout(5)
+        s.recv(256)  # read a little of the stream
+        # SO_LINGER (0) makes close() send a TCP RST — a rude disconnect, like
+        # Ctrl-C on `curl -N`.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        s.close()
+        # The server must still answer normally afterwards.
+        with urlopen(f"http://127.0.0.1:{self.port}/healthz", timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+
+
+class QuietServerTest(unittest.TestCase):
+    """A client vanishing mid-request must not spam a stack trace, but genuine
+    errors must still be reported (DESIGN §8/§11)."""
+
+    def _server(self):
+        return QuietThreadingHTTPServer(("127.0.0.1", 0), make_handler(App()),
+                                        bind_and_activate=False)
+
+    def _handle_with_captured_stderr(self, srv, exc):
+        buf = io.StringIO()
+        old = sys.stderr
+        sys.stderr = buf
+        try:
+            try:
+                raise exc
+            except type(exc):
+                srv.handle_error(None, ("127.0.0.1", 1))
+        finally:
+            sys.stderr = old
+        return buf.getvalue()
+
+    def test_disconnect_errors_are_silent(self):
+        srv = self._server()
+        try:
+            for exc in (ConnectionResetError(54, "reset"), BrokenPipeError()):
+                self.assertEqual(self._handle_with_captured_stderr(srv, exc), "")
+        finally:
+            srv.server_close()
+
+    def test_real_errors_still_reported(self):
+        srv = self._server()
+        try:
+            out = self._handle_with_captured_stderr(srv, ValueError("boom"))
+            self.assertIn("ValueError", out)
+        finally:
+            srv.server_close()
 
 
 if __name__ == "__main__":

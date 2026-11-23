@@ -12,6 +12,7 @@ per connection, which is enough for the skeleton.
 """
 
 import json
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -201,6 +202,24 @@ def make_handler(app: App):
     return Handler
 
 
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that treats a client vanishing mid-request as routine.
+
+    Subscribers (and load clients) disconnect all the time here — the design
+    expects it (§8). A reset/broken-pipe while reading or writing a request is
+    not a server error, so we swallow it instead of dumping a stack trace to
+    stderr (which would be log noise on every disconnect)."""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError,
+                            ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def make_server(address, app: App = None) -> ThreadingHTTPServer:
     """Create (but do not start) the service's HTTP server."""
-    return ThreadingHTTPServer(address, make_handler(app or App()))
+    return QuietThreadingHTTPServer(address, make_handler(app or App()))

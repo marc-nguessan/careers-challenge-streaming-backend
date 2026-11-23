@@ -68,6 +68,10 @@ def serve_alarm_stream(handler, alarms_path: str):
     """Serve GET /alarms/stream on a BaseHTTPRequestHandler. Sends chunked SSE
     headers, then streams until the client disconnects."""
     last_event_id = parse_last_event_id(handler)
+    # SSE is a terminal response: when it ends (client disconnects) we close the
+    # connection rather than loop back to read another request on a socket the
+    # client has already dropped (which would raise mid-handler).
+    handler.close_connection = True
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
     handler.send_header("Cache-Control", "no-cache")

@@ -16,9 +16,10 @@ import json
 import os
 import time
 from http.client import HTTPConnection
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
+from .http_api import QuietThreadingHTTPServer
 from .log import EventLog
 from .metrics import METRICS
 from .validate import validate, ValidationError
@@ -109,7 +110,7 @@ def run_front_on_socket(sock, worker_id: int, owner_port: int, data_dir: str):
     handler = make_front_handler(log, "127.0.0.1", owner_port, alarms_path)
     # Build a server without letting it create/bind its own socket, then attach
     # the shared one so every worker accepts on the same listen queue.
-    server = ThreadingHTTPServer(("0.0.0.0", 0), handler, bind_and_activate=False)
+    server = QuietThreadingHTTPServer(("0.0.0.0", 0), handler, bind_and_activate=False)
     server.socket.close()
     server.socket = sock
     try:
