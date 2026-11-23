@@ -19,7 +19,7 @@ from urllib.parse import urlparse, parse_qs
 
 from .metrics import METRICS
 from .state import AppState
-from .validate import validate, ValidationError
+from .validate import validate, parse_ts, ValidationError
 
 # Window label -> seconds (DESIGN §1, §6). The grader only ever asks for these
 # three, but we also parse the stub's "<n>m"/"<n>h"/"<n>" forms for safety.
@@ -43,12 +43,20 @@ def parse_window(s: str) -> int:
 
 
 def parse_since(s: str) -> float:
-    """`since` accepts epoch seconds or ISO; `0`/empty means everything.
-    Step 1.1 only needs the numeric path; ISO parsing arrives with §7."""
-    try:
-        return float(s or "0")
-    except ValueError:
+    """`since` accepts epoch seconds OR an ISO timestamp; `0`/empty means
+    everything (DESIGN §1). A client that follows the feed incrementally may
+    pass back the ISO `ts` it last saw, so we must parse both forms — otherwise
+    an ISO value would silently fall back to 0 and re-return every alarm."""
+    if not s:
         return 0.0
+    try:
+        return float(s)          # epoch seconds
+    except ValueError:
+        pass
+    try:
+        return parse_ts(s)       # ISO 8601 (with trailing Z) -> epoch
+    except ValidationError:
+        return 0.0               # unparseable -> treat as "everything"
 
 
 class App:

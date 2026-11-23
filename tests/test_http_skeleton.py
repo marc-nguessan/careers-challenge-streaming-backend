@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from service.http_api import App, make_server
+from service.http_api import App, make_server, parse_since
 from service.log import EventLog
 
 
@@ -131,6 +131,21 @@ class HttpSkeletonTest(unittest.TestCase):
     def test_get_unknown_path_404(self):
         status, _ = get(self.base + "/nope")
         self.assertEqual(status, 404)
+
+
+class ParseSinceTest(unittest.TestCase):
+    def test_numeric_epoch(self):
+        self.assertEqual(parse_since("0"), 0.0)
+        self.assertEqual(parse_since("1700000000"), 1700000000.0)
+        self.assertEqual(parse_since("1700000000.5"), 1700000000.5)
+
+    def test_iso_timestamp(self):  # the fix: ISO must parse, not fall back to 0
+        self.assertAlmostEqual(parse_since("2026-05-23T18:53:49.123Z"),
+                               1779562429.123, places=3)
+
+    def test_empty_and_garbage_mean_everything(self):
+        self.assertEqual(parse_since(""), 0.0)
+        self.assertEqual(parse_since("not-a-time"), 0.0)
 
 
 if __name__ == "__main__":
